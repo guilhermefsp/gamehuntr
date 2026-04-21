@@ -1,6 +1,6 @@
 # Board Game Price Tracker — Product Brief
 
-**Working name:** CaçaJogos (provisional — may change)
+**Working name:** GameHunter
 **Status:** Pre-development — architecture decided, ready to build
 **Created:** 2026-04-14
 **Decisions locked:** 2026-04-21
@@ -41,7 +41,7 @@ Target user: Brazilian board game buyer who wants to know the best time and plac
 
 **ComparaJogos** is a C2C marketplace (used games between users) built on Discourse, launched recently (ToS updated April 2026, marketplace in restricted beta). ~3,500 active users/week. They have price comparison in name but focus on user-to-user sales, not retail store tracking. They have no price history, no alerts, no Telegram bot, no retail scraping.
 
-**Key insight:** ComparaJogos and CaçaJogos serve different purchase intents. "Buy new at the best retail price" (CaçaJogos) vs. "buy used from another collector" (ComparaJogos). Opportunity: include C2C prices from ComparaJogos as a source alongside retail — showing new vs. used price on the same page.
+**Key insight:** ComparaJogos and GameHunter serve different purchase intents. "Buy new at the best retail price" (GameHunter) vs. "buy used from another collector" (ComparaJogos). Opportunity: include C2C prices from ComparaJogos as a source alongside retail — showing new vs. used price on the same page.
 
 **The moat is price history.** Every month of data collected before launch is a permanent advantage. Start scrapers in silent mode before public launch.
 
@@ -262,7 +262,7 @@ Sell API access to stores, publishers, or other developers. Long-tail revenue, b
 ## Repository Structure (Planned)
 
 ```
-cacajogos/
+gamehunter/
 ├── docs/
 │   └── product-brief.md     ← this file
 ├── src/

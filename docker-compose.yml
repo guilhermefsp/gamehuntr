@@ -2,9 +2,9 @@ services:
   db:
     image: postgres:16
     environment:
-      POSTGRES_DB: cacajogos
-      POSTGRES_USER: cacajogos
-      POSTGRES_PASSWORD: cacajogos
+      POSTGRES_DB: gamehunter
+      POSTGRES_USER: gamehunter
+      POSTGRES_PASSWORD: gamehunter
     ports:
       - "5432:5432"
     volumes:
