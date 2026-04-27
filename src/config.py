@@ -12,5 +12,11 @@ class Settings(BaseSettings):
     amazon_partner_tag: str
     amazon_country: str = "BR"
 
+    # Optional — only needed for Claude's Telegram testing scripts
+    telegram_api_id: int | None = None
+    telegram_api_hash: str | None = None
+    telegram_session: str | None = None
+    telegram_bot_username: str | None = None
+
 
 settings = Settings()

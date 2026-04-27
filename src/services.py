@@ -1,25 +1,34 @@
-from sqlalchemy import select
+import logging
+
+from sqlalchemy import delete, select
 
 from src.database import AsyncSessionLocal
-from src.models import Game, Listing, PriceHistory, Store
+from src.models import Game, Listing, LudopediaListing, PriceHistory, Store
 from src.scrapers import amazon, ludopedia
+from src.scrapers import ludopedia_marketplace
+
+logger = logging.getLogger(__name__)
 
 AMAZON_STORE_NAME = "Amazon BR"
 
 
 async def get_price(query: str) -> dict | None:
-    """Main entry point: resolve game, fetch Amazon price, persist, return display dict."""
+    """Main entry point: resolve game, fetch C2C + Amazon prices, persist, return display dict."""
     game = await _resolve_game(query)
     if not game:
         return None
 
+    # Backfill ludopedia_link for games added before this feature
+    if not game.ludopedia_link:
+        game = await _backfill_link(game)
+
+    c2c = await _fetch_c2c_data(game)
+
     if not game.asin:
         results = amazon.search_items(query, count=1)
-        if not results:
-            return {"title": game.title, "ludopedia_id": game.ludopedia_id, "price_brl": None, "in_stock": False, "url": None, "lowest_ever": None}
-        top = results[0]
-        await _save_asin(game.ludopedia_id, top["asin"])
-        game.asin = top["asin"]
+        if results:
+            await _save_asin(game.ludopedia_id, results[0]["asin"])
+            game.asin = results[0]["asin"]
 
     amazon_result = amazon.search_items(game.title, count=1)
     item = amazon_result[0] if amazon_result else None
@@ -36,6 +45,7 @@ async def get_price(query: str) -> dict | None:
         "in_stock": item["in_stock"] if item else False,
         "url": item["url"] if item else None,
         "lowest_ever": lowest,
+        **c2c,
     }
 
 
@@ -45,6 +55,50 @@ async def get_amazon_alternatives(query: str) -> list[dict]:
 
 async def update_asin(ludopedia_id: int, asin: str) -> None:
     await _save_asin(ludopedia_id, asin)
+
+
+async def _fetch_c2c_data(game: Game) -> dict:
+    if not game.ludopedia_link:
+        return {"c2c_avg": None, "c2c_count": 0, "c2c_url": None}
+
+    c2c_url = f"{game.ludopedia_link}?v=anuncios"
+
+    try:
+        listings = await ludopedia_marketplace.scrape_listings(game.ludopedia_link, game.title)
+    except Exception as e:
+        logger.warning("Marketplace scrape failed for %s: %s", game.title, e)
+        return {"c2c_avg": None, "c2c_count": 0, "c2c_url": c2c_url}
+
+    if listings:
+        await _save_ludopedia_listings(game.ludopedia_id, listings)
+
+    novo_prices = [
+        l["price_brl"]
+        for l in listings
+        if l["is_game_match"] and l["condition"] == "Novo" and l["price_brl"] is not None
+    ]
+    c2c_avg = sum(novo_prices) / len(novo_prices) if novo_prices else None
+
+    return {"c2c_avg": c2c_avg, "c2c_count": len(novo_prices), "c2c_url": c2c_url}
+
+
+async def _save_ludopedia_listings(game_id: int, listings: list[dict]) -> None:
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            delete(LudopediaListing).where(LudopediaListing.game_id == game_id)
+        )
+        for l in listings:
+            session.add(LudopediaListing(
+                game_id=game_id,
+                listing_url=l["listing_url"],
+                product_name=l["product_name"],
+                city=l["city"],
+                price_brl=l["price_brl"],
+                condition=l["condition"],
+                notes=l["notes"],
+                is_game_match=l["is_game_match"],
+            ))
+        await session.commit()
 
 
 async def _resolve_game(query: str) -> Game | None:
@@ -61,17 +115,59 @@ async def _resolve_game(query: str) -> Game | None:
         return None
 
     raw = results[0]
+    link = _normalize_link(raw.get("link", ""))
+
+    # Fallback: search endpoint may not include link — fetch detail
+    if not link:
+        try:
+            detail = await ludopedia.get_game(raw["id_jogo"])
+            link = _normalize_link(detail.get("link", ""))
+        except Exception:
+            link = None
+
     game = Game(
         ludopedia_id=raw["id_jogo"],
         title=raw["nm_jogo"],
         thumbnail=raw.get("thumb"),
         qt_quer=raw.get("qt_quer"),
+        ludopedia_link=link or None,
     )
     async with AsyncSessionLocal() as session:
         session.add(game)
         await session.commit()
         await session.refresh(game)
     return game
+
+
+async def _backfill_link(game: Game) -> Game:
+    try:
+        detail = await ludopedia.get_game(game.ludopedia_id)
+        link = _normalize_link(detail.get("link", ""))
+        if link:
+            async with AsyncSessionLocal() as session:
+                result = await session.execute(
+                    select(Game).where(Game.ludopedia_id == game.ludopedia_id)
+                )
+                g = result.scalar_one_or_none()
+                if g:
+                    g.ludopedia_link = link
+                    await session.commit()
+                    await session.refresh(g)
+                    return g
+    except Exception as e:
+        logger.warning("Could not backfill link for game %s: %s", game.ludopedia_id, e)
+    return game
+
+
+def _normalize_link(link: str) -> str:
+    if not link:
+        return ""
+    # Fix "https:ludopedia.com.br/..." (missing //) seen in API docs example
+    if link.startswith("https:") and not link.startswith("https://"):
+        link = "https://" + link[6:]
+    elif link.startswith("/"):
+        link = "https://ludopedia.com.br" + link
+    return link.rstrip("/")
 
 
 async def _save_asin(ludopedia_id: int, asin: str) -> None:
@@ -89,7 +185,7 @@ async def _record_price(game: Game, item: dict) -> None:
         result = await session.execute(
             select(Listing).where(
                 Listing.game_id == game.ludopedia_id,
-                Listing.store_id == store.id
+                Listing.store_id == store.id,
             )
         )
         listing = result.scalar_one_or_none()

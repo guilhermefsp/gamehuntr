@@ -64,20 +64,32 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 def _format_price_message(result: dict) -> str:
-    price_str = f"R$ {result['price_brl']:.2f}" if result['price_brl'] else "Preço indisponível"
-    stock_str = "✅ Em estoque" if result['in_stock'] else "❌ Fora de estoque"
-    lowest_str = (
-        f"\n📉 Menor preço histórico: R$ {result['lowest_ever']:.2f}"
-        if result.get('lowest_ever')
-        else "\n📉 Menor preço histórico: primeiro registro"
-    )
+    lines = [f"🎲 *{result['title']}*\n"]
 
-    return (
-        f"🎲 *{result['title']}*\n\n"
-        f"Amazon: {price_str} {stock_str}\n"
-        f"[Comprar na Amazon]({result['url']})"
-        f"{lowest_str}"
-    )
+    # Ludopedia C2C
+    if result.get("c2c_avg") is not None:
+        lines.append(
+            f"C2C Novo: R$ {result['c2c_avg']:.2f} média ({result['c2c_count']} anúncios)"
+            + (f" — [ver anúncios]({result['c2c_url']})" if result.get("c2c_url") else "")
+        )
+    elif result.get("c2c_url"):
+        lines.append(f"C2C: sem anúncios Novo — [ver anúncios]({result['c2c_url']})")
+
+    # Amazon
+    price_str = f"R$ {result['price_brl']:.2f}" if result["price_brl"] else "Preço indisponível"
+    stock_str = "✅" if result["in_stock"] else "❌"
+    amazon_line = f"Amazon: {price_str} {stock_str}"
+    if result.get("url"):
+        amazon_line += f" — [comprar]({result['url']})"
+    lines.append(amazon_line)
+
+    # Lowest ever
+    if result.get("lowest_ever"):
+        lines.append(f"📉 Menor histórico: R$ {result['lowest_ever']:.2f}")
+    else:
+        lines.append("📉 Menor histórico: primeiro registro")
+
+    return "\n".join(lines)
 
 
 def register(application) -> None:
