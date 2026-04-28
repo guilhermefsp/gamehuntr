@@ -103,9 +103,7 @@ def register(application) -> None:
     # Telegram only allows ASCII command names, so /preço can't be a CommandHandler.
     # Catch it as a text message instead so users who type /preço still get a response.
     from telegram.ext import MessageHandler, filters
-    application.add_handler(MessageHandler(
-        filters.TEXT & filters.Regex(r"^/preço"), preco
-    ))
+    application.add_handler(MessageHandler(filters.Regex(r"^/preço"), preco))
     application.add_handler(CallbackQueryHandler(fix_asin_callback, pattern=r"^fix:"))
     application.add_handler(CallbackQueryHandler(set_asin_callback, pattern=r"^setalternative:"))
     application.add_handler(CallbackQueryHandler(cancel_callback, pattern=r"^cancel$"))
