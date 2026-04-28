@@ -5,11 +5,17 @@ from src import services
 
 
 async def preco(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args:
+    # CommandHandler populates context.args; MessageHandler (for /preço) does not
+    if context.args:
+        query = " ".join(context.args)
+    else:
+        text = update.message.text or ""
+        parts = text.split(maxsplit=1)
+        query = parts[1] if len(parts) > 1 else ""
+
+    if not query:
         await update.message.reply_text("Uso: /preço <nome do jogo>")
         return
-
-    query = " ".join(context.args)
     msg = await update.message.reply_text(f"Buscando preço de *{query}*...", parse_mode="Markdown")
 
     result = await services.get_price(query)
@@ -93,8 +99,13 @@ def _format_price_message(result: dict) -> str:
 
 
 def register(application) -> None:
-    application.add_handler(CommandHandler("preço", preco))
-    application.add_handler(CommandHandler("preco", preco))  # ASCII alias for autocomplete
+    application.add_handler(CommandHandler("preco", preco))
+    # Telegram only allows ASCII command names, so /preço can't be a CommandHandler.
+    # Catch it as a text message instead so users who type /preço still get a response.
+    from telegram.ext import MessageHandler, filters
+    application.add_handler(MessageHandler(
+        filters.TEXT & filters.Regex(r"^/preço"), preco
+    ))
     application.add_handler(CallbackQueryHandler(fix_asin_callback, pattern=r"^fix:"))
     application.add_handler(CallbackQueryHandler(set_asin_callback, pattern=r"^setalternative:"))
     application.add_handler(CallbackQueryHandler(cancel_callback, pattern=r"^cancel$"))
