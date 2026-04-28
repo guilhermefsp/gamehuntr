@@ -1,0 +1,3 @@
+-add images of the game on replies after /preço, maybe use LudoAPI or BGG
+-we need a desambiguation option after running /preço. User may be searching for game "Abomination: Heir of Frankenstein" but search just for abomination
+-create website so I see and query the backend, games we have, how prices changed overtime, etc on games we already added to the database  

@@ -17,7 +17,7 @@
 | Run migration (local) | `DATABASE_URL="postgresql+asyncpg://gamehunter:gamehunter@localhost:5432/gamehunter" uv run --directory "D:/The Brain/raw/projects/boardgame-tracker" alembic upgrade head` |
 | Run migration (Neon) | `DATABASE_URL="<neon-url>" uv run --directory "D:/The Brain/raw/projects/boardgame-tracker" alembic upgrade head` |
 | Test stack | `uv run --directory "D:/The Brain/raw/projects/boardgame-tracker" python scripts/test_preco.py "Castle Combo"` |
-| Test via Telegram | PowerShell: `cd "D:\The Brain\raw\projects\boardgame-tracker"; uv run python scripts/test_telegram.py "/preco Castle Combo"` |
+| Test via Telegram | PowerShell: `uv run --directory "D:\The Brain\raw\projects\boardgame-tracker" python scripts/test_telegram.py "/preco Castle Combo"` |
 | Register webhook (prod) | `uv run --directory "D:/The Brain/raw/projects/boardgame-tracker" python scripts/setup_webhook.py https://your-app.vercel.app` |
 
 ## Deployment (Vercel + Neon)
