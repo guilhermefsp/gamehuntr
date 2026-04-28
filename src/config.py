@@ -1,3 +1,4 @@
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +28,12 @@ class Settings(BaseSettings):
     telegram_api_hash: str | None = None
     telegram_session: str | None = None
     telegram_bot_username: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def strip_bom(cls, values: dict) -> dict:
+        """Strip UTF-8 BOM (﻿) injected by some Windows tools when setting env vars."""
+        return {k: v.lstrip("﻿") if isinstance(v, str) else v for k, v in values.items()}
 
 
 settings = Settings()
