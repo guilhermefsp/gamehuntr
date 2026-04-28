@@ -2,6 +2,7 @@ import logging
 
 from sqlalchemy import delete, select
 
+from src.config import settings
 from src.database import AsyncSessionLocal
 from src.models import Game, Listing, LudopediaListing, PriceHistory, Store
 from src.scrapers import amazon, ludopedia
@@ -18,8 +19,8 @@ async def get_price(query: str) -> dict | None:
     if not game:
         return None
 
-    # Backfill ludopedia_link for games added before this feature
-    if not game.ludopedia_link:
+    # Backfill ludopedia_link if missing or stored as a broken relative path
+    if not game.ludopedia_link or not game.ludopedia_link.startswith("https://"):
         game = await _backfill_link(game)
 
     c2c = await _fetch_c2c_data(game)
@@ -55,6 +56,41 @@ async def get_amazon_alternatives(query: str) -> list[dict]:
 
 async def update_asin(ludopedia_id: int, asin: str) -> None:
     await _save_asin(ludopedia_id, asin)
+
+
+async def sync_wishlist_prices() -> dict:
+    """Scrape the Amazon wishlist, match games to Ludopedia, store prices. No-op when disabled."""
+    if not settings.wishlist_enabled or not settings.wishlist_url:
+        return {"skipped": True}
+
+    from src.scrapers import amazon_wishlist
+
+    items = await amazon_wishlist.scrape_wishlist(settings.wishlist_url)
+    synced = 0
+    failed = 0
+
+    for item in items:
+        try:
+            game = await _get_game_by_asin(item["asin"])
+            if not game and item["title"]:
+                game = await _resolve_game(item["title"])
+                if game and not game.asin:
+                    await _save_asin(game.ludopedia_id, item["asin"])
+                    game.asin = item["asin"]
+
+            if game and item["price_brl"] is not None:
+                await _record_price(game, {
+                    "price_brl": item["price_brl"],
+                    "in_stock": True,
+                    "url": item["url"],
+                })
+                synced += 1
+        except Exception as e:
+            logger.warning("Wishlist sync failed for ASIN %s: %s", item.get("asin"), e)
+            failed += 1
+
+    logger.info("Wishlist sync complete: %d synced, %d failed, %d total", synced, failed, len(items))
+    return {"synced": synced, "failed": failed, "total": len(items)}
 
 
 async def _fetch_c2c_data(game: Game) -> dict:
@@ -99,6 +135,12 @@ async def _save_ludopedia_listings(game_id: int, listings: list[dict]) -> None:
                 is_game_match=l["is_game_match"],
             ))
         await session.commit()
+
+
+async def _get_game_by_asin(asin: str) -> Game | None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Game).where(Game.asin == asin))
+        return result.scalar_one_or_none()
 
 
 async def _resolve_game(query: str) -> Game | None:
@@ -162,11 +204,14 @@ async def _backfill_link(game: Game) -> Game:
 def _normalize_link(link: str) -> str:
     if not link:
         return ""
-    # Fix "https:ludopedia.com.br/..." (missing //) seen in API docs example
-    if link.startswith("https:") and not link.startswith("https://"):
+    if link.startswith("https://") or link.startswith("http://"):
+        pass
+    elif link.startswith("https:"):
         link = "https://" + link[6:]
     elif link.startswith("/"):
         link = "https://ludopedia.com.br" + link
+    else:
+        link = "https://ludopedia.com.br/" + link
     return link.rstrip("/")
 
 

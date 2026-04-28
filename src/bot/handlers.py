@@ -6,7 +6,7 @@ from src import services
 
 async def preco(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not context.args:
-        await update.message.reply_text("Uso: /preco <nome do jogo>")
+        await update.message.reply_text("Uso: /preço <nome do jogo>")
         return
 
     query = " ".join(context.args)
@@ -55,7 +55,7 @@ async def set_asin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     _, ludopedia_id, asin = query.data.split(":")
     await services.update_asin(int(ludopedia_id), asin)
     await query.edit_message_reply_markup(None)
-    await query.message.reply_text("ASIN corrigido. Use /preco novamente para ver o resultado atualizado.")
+    await query.message.reply_text("ASIN corrigido. Use /preço novamente para ver o resultado atualizado.")
 
 
 async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -93,7 +93,8 @@ def _format_price_message(result: dict) -> str:
 
 
 def register(application) -> None:
-    application.add_handler(CommandHandler("preco", preco))
+    application.add_handler(CommandHandler("preço", preco))
+    application.add_handler(CommandHandler("preco", preco))  # ASCII alias for autocomplete
     application.add_handler(CallbackQueryHandler(fix_asin_callback, pattern=r"^fix:"))
     application.add_handler(CallbackQueryHandler(set_asin_callback, pattern=r"^setalternative:"))
     application.add_handler(CallbackQueryHandler(cancel_callback, pattern=r"^cancel$"))
