@@ -73,13 +73,15 @@ def _format_price_message(result: dict) -> str:
     lines = [f"🎲 *{result['title']}*\n"]
 
     # Ludopedia C2C
-    if result.get("c2c_avg") is not None:
-        lines.append(
-            f"C2C Novo: R$ {result['c2c_avg']:.2f} média ({result['c2c_count']} anúncios)"
-            + (f" — [ver anúncios]({result['c2c_url']})" if result.get("c2c_url") else "")
-        )
-    elif result.get("c2c_url"):
-        lines.append(f"C2C: sem anúncios Novo — [ver anúncios]({result['c2c_url']})")
+    url_suffix = f" — [ver anúncios]({result['c2c_url']})" if result.get("c2c_url") else ""
+    has_novo = result.get("c2c_novo_min") is not None
+    has_used = result.get("c2c_used_min") is not None
+    if has_novo:
+        lines.append(f"C2C Novo: R$ {result['c2c_novo_min']:.2f} min ({result['c2c_novo_count']} anúncios){url_suffix}")
+    if has_used:
+        lines.append(f"C2C Usado: R$ {result['c2c_used_min']:.2f} min ({result['c2c_used_count']} anúncios)")
+    if not has_novo and not has_used and result.get("c2c_url"):
+        lines.append(f"C2C: Esse jogo não tem anúncios no momento{url_suffix}")
 
     # Amazon
     price_str = f"R$ {result['price_brl']:.2f}" if result["price_brl"] else "Preço indisponível"

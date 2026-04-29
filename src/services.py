@@ -95,7 +95,7 @@ async def sync_wishlist_prices() -> dict:
 
 async def _fetch_c2c_data(game: Game) -> dict:
     if not game.ludopedia_link:
-        return {"c2c_avg": None, "c2c_count": 0, "c2c_url": None}
+        return {"c2c_novo_min": None, "c2c_novo_count": 0, "c2c_used_min": None, "c2c_used_count": 0, "c2c_url": None}
 
     c2c_url = f"{game.ludopedia_link}?v=anuncios"
 
@@ -103,19 +103,22 @@ async def _fetch_c2c_data(game: Game) -> dict:
         listings = await ludopedia_marketplace.scrape_listings(game.ludopedia_link, game.title)
     except Exception as e:
         logger.warning("Marketplace scrape failed for %s: %s", game.title, e)
-        return {"c2c_avg": None, "c2c_count": 0, "c2c_url": c2c_url}
+        return {"c2c_novo_min": None, "c2c_novo_count": 0, "c2c_used_min": None, "c2c_used_count": 0, "c2c_url": c2c_url}
 
     if listings:
         await _save_ludopedia_listings(game.ludopedia_id, listings)
 
-    novo_prices = [
-        l["price_brl"]
-        for l in listings
-        if l["is_game_match"] and l["condition"] == "Novo" and l["price_brl"] is not None
-    ]
-    c2c_avg = sum(novo_prices) / len(novo_prices) if novo_prices else None
+    matched = [l for l in listings if l["is_game_match"] and l["price_brl"] is not None]
+    novo_prices = [l["price_brl"] for l in matched if l["condition"] == "Novo"]
+    used_prices = [l["price_brl"] for l in matched if l["condition"] == "Usado"]
 
-    return {"c2c_avg": c2c_avg, "c2c_count": len(novo_prices), "c2c_url": c2c_url}
+    return {
+        "c2c_novo_min": min(novo_prices) if novo_prices else None,
+        "c2c_novo_count": len(novo_prices),
+        "c2c_used_min": min(used_prices) if used_prices else None,
+        "c2c_used_count": len(used_prices),
+        "c2c_url": c2c_url,
+    }
 
 
 async def _save_ludopedia_listings(game_id: int, listings: list[dict]) -> None:
