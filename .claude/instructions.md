@@ -19,6 +19,7 @@
 | Test stack | `uv run --directory "D:/The Brain/raw/projects/boardgame-tracker" python scripts/test_preco.py "Castle Combo"` |
 | Test via Telegram | PowerShell: `uv run --directory "D:\The Brain\raw\projects\boardgame-tracker" python scripts/test_telegram.py "/preco Castle Combo"` |
 | Register webhook (prod) | `uv run --directory "D:/The Brain/raw/projects/boardgame-tracker" python scripts/setup_webhook.py https://your-app.vercel.app` |
+| **Deploy to production** | `git -C "D:/The Brain/raw/projects/boardgame-tracker" push origin main && vercel --cwd "D:/The Brain/raw/projects/boardgame-tracker" --prod` |
 
 ## Deployment (Vercel + Neon)
 

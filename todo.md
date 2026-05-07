@@ -6,7 +6,7 @@ See PRODUCT_BRIEF.md for full phased plan. Summary:
 - [ ] /preço → send_photo with BGG rating/weight enrichment (bgg_rating, bgg_weight columns)
 - [ ] Disambiguation: fetch rows=5, "Jogo errado?" → results #2-5 as new photo + inline buttons
 - [ ] Link support: /preço <ludopedia_url> and /preço <bgg_url>
-- [ ] Enable wishlist scraper (WISHLIST_ENABLED=True)
+- [ ] PA API as primary price path; wishlist scraper as fallback
 
 ## Phase 2 — Engagement
 - [ ] User table FK + watchlist table (migration)
@@ -22,4 +22,3 @@ See PRODUCT_BRIEF.md for full phased plan. Summary:
 
 ## Post-launch
 - [ ] MercadoLivre scraper (Playwright)
-- [ ] Amazon PA API (retire wishlist scraper)

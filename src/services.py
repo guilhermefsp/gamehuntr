@@ -25,17 +25,26 @@ async def get_price(query: str) -> dict | None:
 
     c2c = await _fetch_c2c_data(game)
 
-    if not game.asin:
-        results = amazon.search_items(query, count=1)
-        if results:
-            await _save_asin(game.ludopedia_id, results[0]["asin"])
-            game.asin = results[0]["asin"]
+    # 1. PA API (primary)
+    item = None
+    if amazon.is_available():
+        if not game.asin:
+            results = amazon.search_items(query, count=1)
+            if results:
+                await _save_asin(game.ludopedia_id, results[0]["asin"])
+                game.asin = results[0]["asin"]
+        amazon_result = amazon.search_items(game.title, count=1)
+        item = amazon_result[0] if amazon_result else None
+        if item:
+            await _record_price(game, item)
 
-    amazon_result = amazon.search_items(game.title, count=1)
-    item = amazon_result[0] if amazon_result else None
+    # 2. Stored DB price fallback (from last PA API or wishlist cron run)
+    if not item:
+        item = await _get_stored_amazon_price(game)
 
-    if item:
-        await _record_price(game, item)
+    # 3. Live wishlist scrape fallback (when enabled; matches by ASIN or title)
+    if not item and settings.wishlist_enabled and settings.wishlist_url:
+        item = await _fetch_wishlist_price(game)
 
     lowest = await _get_lowest_ever(game.ludopedia_id)
 
@@ -259,6 +268,41 @@ async def _record_price(game: Game, item: dict) -> None:
             in_stock=item["in_stock"],
         ))
         await session.commit()
+
+
+async def _get_stored_amazon_price(game: Game) -> dict | None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            select(Listing)
+            .join(Store, Listing.store_id == Store.id)
+            .where(Listing.game_id == game.ludopedia_id, Store.name == AMAZON_STORE_NAME)
+        )
+        listing = result.scalar_one_or_none()
+        if listing:
+            return {"price_brl": listing.price_brl, "in_stock": listing.in_stock, "url": listing.url}
+    return None
+
+
+async def _fetch_wishlist_price(game: Game) -> dict | None:
+    from src.scrapers import amazon_wishlist
+    try:
+        items = await amazon_wishlist.scrape_wishlist(settings.wishlist_url)
+        # Match by ASIN if known, otherwise fall back to case-insensitive title match
+        match = None
+        if game.asin:
+            match = next((i for i in items if i["asin"] == game.asin), None)
+        if not match:
+            game_title_lower = game.title.lower()
+            match = next((i for i in items if i.get("title") and game_title_lower in i["title"].lower()), None)
+        if match:
+            if not game.asin and match.get("asin"):
+                await _save_asin(game.ludopedia_id, match["asin"])
+                game.asin = match["asin"]
+            await _record_price(game, {"price_brl": match["price_brl"], "in_stock": True, "url": match["url"]})
+            return match
+    except Exception as e:
+        logger.warning("Wishlist fallback failed for %s: %s", game.title, e)
+    return None
 
 
 async def _get_or_create_amazon_store(session) -> Store:

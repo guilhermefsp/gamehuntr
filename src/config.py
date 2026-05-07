@@ -3,17 +3,17 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8-sig")
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8-sig", extra="ignore")
 
     database_url: str
     telegram_bot_token: str
     ludopedia_access_token: str
 
-    # Amazon PA API — optional until credentials are obtained
-    amazon_access_key: str = "unset"
-    amazon_secret_key: str = "unset"
+    # Amazon Creators API credentials (replaces old PA API)
+    amazon_access_key: str = "unset"      # Credential ID from Creators API portal
+    amazon_secret_key: str = "unset"      # Secret from Creators API portal
     amazon_partner_tag: str = ""
-    amazon_country: str = "BR"
+    amazon_credential_version: str = "3.1"  # 3.1=NA/LWA, 3.2=EU/LWA, 3.3=FE/LWA
 
     # Wishlist scraper — set WISHLIST_ENABLED=true to activate
     # Disable (set to false) once Amazon PA API credentials are available

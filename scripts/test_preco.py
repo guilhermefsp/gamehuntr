@@ -3,7 +3,10 @@ Quick CLI test for get_price() — exercises Ludopedia API, marketplace scraper,
 Usage: uv run python scripts/test_preco.py "Castle Combo"
 """
 import asyncio
+import logging
 import sys
+
+logging.basicConfig(level=logging.WARNING)
 
 from src.bot.handlers import _format_price_message
 from src.services import get_price
