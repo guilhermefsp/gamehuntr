@@ -11,6 +11,9 @@ class Game(Base):
 
     ludopedia_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     bgg_id: Mapped[int | None] = mapped_column(Integer, nullable=True, unique=True)
+    bgg_rating: Mapped[float | None] = mapped_column(Numeric(4, 2), nullable=True)
+    bgg_weight: Mapped[float | None] = mapped_column(Numeric(4, 2), nullable=True)
+    bgg_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     asin: Mapped[str | None] = mapped_column(String(16), nullable=True, unique=True)
     ludopedia_link: Mapped[str | None] = mapped_column(String(512), nullable=True)
     title: Mapped[str] = mapped_column(String(256))

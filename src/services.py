@@ -1,16 +1,19 @@
 import logging
+from datetime import datetime
 
 from sqlalchemy import delete, select
 
 from src.config import settings
 from src.database import AsyncSessionLocal
 from src.models import Game, Listing, LudopediaListing, PriceHistory, Store
-from src.scrapers import amazon, ludopedia
+from src.scrapers import amazon, bgg, ludopedia
 from src.scrapers import ludopedia_marketplace
 
 logger = logging.getLogger(__name__)
 
 AMAZON_STORE_NAME = "Amazon BR"
+LUDOPEDIA_NOVO_STORE_NAME = "Ludopedia C2C Novo"
+LUDOPEDIA_USADO_STORE_NAME = "Ludopedia C2C Usado"
 
 
 async def get_price(query: str) -> dict | None:
@@ -21,9 +24,30 @@ async def get_price(query: str) -> dict | None:
 
     # Backfill ludopedia_link if missing or stored as a broken relative path
     if not game.ludopedia_link or not game.ludopedia_link.startswith("https://"):
-        game = await _backfill_link(game)
+        game = await backfill_link(game)
 
-    c2c = await _fetch_c2c_data(game)
+    game = await enrich_bgg(game)
+
+    c2c = await fetch_c2c_data(game)
+    item = await resolve_amazon_price(game, query)
+    lowest = await _get_lowest_ever(game.ludopedia_id)
+
+    return {
+        "title": game.title,
+        "ludopedia_id": game.ludopedia_id,
+        "price_brl": item["price_brl"] if item else None,
+        "in_stock": item["in_stock"] if item else False,
+        "url": item["url"] if item else None,
+        "lowest_ever": lowest,
+        **c2c,
+    }
+
+
+async def resolve_amazon_price(game: Game, query: str | None = None) -> dict | None:
+    """3-tier Amazon price resolution: Creators API -> stored DB price -> wishlist
+    scrape fallback. Shared by the interactive get_price() flow and the bulk
+    price-export job."""
+    query = query or game.title
 
     # 1. PA API (primary)
     item = None
@@ -46,17 +70,7 @@ async def get_price(query: str) -> dict | None:
     if not item and settings.wishlist_enabled and settings.wishlist_url:
         item = await _fetch_wishlist_price(game)
 
-    lowest = await _get_lowest_ever(game.ludopedia_id)
-
-    return {
-        "title": game.title,
-        "ludopedia_id": game.ludopedia_id,
-        "price_brl": item["price_brl"] if item else None,
-        "in_stock": item["in_stock"] if item else False,
-        "url": item["url"] if item else None,
-        "lowest_ever": lowest,
-        **c2c,
-    }
+    return item
 
 
 async def get_amazon_alternatives(query: str) -> list[dict]:
@@ -102,7 +116,7 @@ async def sync_wishlist_prices() -> dict:
     return {"synced": synced, "failed": failed, "total": len(items)}
 
 
-async def _fetch_c2c_data(game: Game) -> dict:
+async def fetch_c2c_data(game: Game) -> dict:
     if not game.ludopedia_link:
         return {"c2c_novo_min": None, "c2c_novo_count": 0, "c2c_used_min": None, "c2c_used_count": 0, "c2c_url": None}
 
@@ -120,14 +134,34 @@ async def _fetch_c2c_data(game: Game) -> dict:
     matched = [l for l in listings if l["is_game_match"] and l["price_brl"] is not None]
     novo_prices = [l["price_brl"] for l in matched if l["condition"] == "Novo"]
     used_prices = [l["price_brl"] for l in matched if l["condition"] == "Usado"]
+    novo_min = min(novo_prices) if novo_prices else None
+    used_min = min(used_prices) if used_prices else None
+
+    await _record_c2c_price(game, LUDOPEDIA_NOVO_STORE_NAME, novo_min, c2c_url)
+    await _record_c2c_price(game, LUDOPEDIA_USADO_STORE_NAME, used_min, c2c_url)
 
     return {
-        "c2c_novo_min": min(novo_prices) if novo_prices else None,
+        "c2c_novo_min": novo_min,
         "c2c_novo_count": len(novo_prices),
-        "c2c_used_min": min(used_prices) if used_prices else None,
+        "c2c_used_min": used_min,
         "c2c_used_count": len(used_prices),
         "c2c_url": c2c_url,
     }
+
+
+async def _record_c2c_price(game: Game, store_name: str, price_brl: float | None, url: str | None) -> None:
+    """Records a Ludopedia C2C min-price snapshot as PriceHistory, reusing the same
+    Store/Listing/PriceHistory tables Amazon prices already use — this is what actually
+    gives C2C prices a history, since LudopediaListing rows are fully replaced on
+    every scrape and have no trend data of their own."""
+    if price_brl is None:
+        return
+    await _record_price(
+        game,
+        {"price_brl": price_brl, "in_stock": True, "url": url or ""},
+        store_name=store_name,
+        store_base_url="https://ludopedia.com.br",
+    )
 
 
 async def _save_ludopedia_listings(game_id: int, listings: list[dict]) -> None:
@@ -193,7 +227,7 @@ async def _resolve_game(query: str) -> Game | None:
     return game
 
 
-async def _backfill_link(game: Game) -> Game:
+async def backfill_link(game: Game) -> Game:
     try:
         detail = await ludopedia.get_game(game.ludopedia_id)
         link = _normalize_link(detail.get("link", ""))
@@ -210,6 +244,30 @@ async def _backfill_link(game: Game) -> Game:
                     return g
     except Exception as e:
         logger.warning("Could not backfill link for game %s: %s", game.ludopedia_id, e)
+    return game
+
+
+async def enrich_bgg(game: Game) -> Game:
+    """Best-effort BGG metadata enrichment. Never raises; caches via bgg_synced_at
+    so we don't re-query BGG (slow, rate-limited) on every single lookup."""
+    if game.bgg_synced_at is not None or not settings.bgg_api_token:
+        return game
+    try:
+        bgg_id = game.bgg_id or await bgg.search_game(game.title)
+        details = await bgg.get_game_details(bgg_id) if bgg_id else None
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Game).where(Game.ludopedia_id == game.ludopedia_id))
+            g = result.scalar_one_or_none()
+            if g:
+                g.bgg_id = bgg_id
+                g.bgg_rating = details["rating"] if details else None
+                g.bgg_weight = details["weight"] if details else None
+                g.bgg_synced_at = datetime.utcnow()
+                await session.commit()
+                await session.refresh(g)
+                return g
+    except Exception as e:
+        logger.warning("BGG enrichment failed for %s: %s", game.title, e)
     return game
 
 
@@ -236,9 +294,14 @@ async def _save_asin(ludopedia_id: int, asin: str) -> None:
             await session.commit()
 
 
-async def _record_price(game: Game, item: dict) -> None:
+async def _record_price(
+    game: Game,
+    item: dict,
+    store_name: str = AMAZON_STORE_NAME,
+    store_base_url: str = "https://www.amazon.com.br",
+) -> None:
     async with AsyncSessionLocal() as session:
-        store = await _get_or_create_amazon_store(session)
+        store = await _get_or_create_store(session, store_name, store_base_url)
         result = await session.execute(
             select(Listing).where(
                 Listing.game_id == game.ludopedia_id,
@@ -298,18 +361,19 @@ async def _fetch_wishlist_price(game: Game) -> dict | None:
             if not game.asin and match.get("asin"):
                 await _save_asin(game.ludopedia_id, match["asin"])
                 game.asin = match["asin"]
-            await _record_price(game, {"price_brl": match["price_brl"], "in_stock": True, "url": match["url"]})
-            return match
+            result = {"price_brl": match["price_brl"], "in_stock": True, "url": match["url"]}
+            await _record_price(game, result)
+            return result
     except Exception as e:
         logger.warning("Wishlist fallback failed for %s: %s", game.title, e)
     return None
 
 
-async def _get_or_create_amazon_store(session) -> Store:
-    result = await session.execute(select(Store).where(Store.name == AMAZON_STORE_NAME))
+async def _get_or_create_store(session, name: str, base_url: str) -> Store:
+    result = await session.execute(select(Store).where(Store.name == name))
     store = result.scalar_one_or_none()
     if not store:
-        store = Store(name=AMAZON_STORE_NAME, base_url="https://www.amazon.com.br")
+        store = Store(name=name, base_url=base_url)
         session.add(store)
         await session.flush()
     return store

@@ -1,8 +1,8 @@
 import codecs
 import subprocess
 
-env_path = r"D:\The Brain\raw\projects\boardgame-tracker\.env"
-project_path = r"D:\The Brain\raw\projects\boardgame-tracker"
+env_path = r"D:\The Brain\projects\boardgame-tracker\.env"
+project_path = r"D:\The Brain\projects\boardgame-tracker"
 
 with codecs.open(env_path, "r", encoding="utf-8-sig") as f:
     for line in f:

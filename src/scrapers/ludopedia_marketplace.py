@@ -1,7 +1,6 @@
 import re
 
-import httpx
-from bs4 import BeautifulSoup
+from src.scrapers import fetch as fetch_module
 
 _HEADERS = {
     "User-Agent": (
@@ -28,35 +27,44 @@ async def scrape_listings(game_link: str, game_title: str) -> list[dict]:
     """
     url = f"{game_link.rstrip('/')}?v=anuncios"
 
-    async with httpx.AsyncClient(timeout=20, headers=_HEADERS, follow_redirects=True) as client:
-        r = await client.get(url)
-        r.raise_for_status()
+    # Ludopedia doesn't block tier-1 requests today, so no stealth retry-on-empty
+    # here (unlike amazon_wishlist.py) — a stealth retry would just add latency
+    # with no benefit for a site that isn't blocking us.
+    result = await fetch_module.fetch(url, headers=_HEADERS)
+    if not result:
+        raise RuntimeError(f"Failed to fetch marketplace page for {game_title}")
 
-    soup = BeautifulSoup(r.text, "html.parser")
-    tbody = soup.find("tbody")
-    if not tbody:
+    page = result.page
+    # Adaptive relocation is only applied to this outer row selector: it appears once
+    # per page, so its (url, identifier) fingerprint is unambiguous. The nested per-row
+    # lookups below deliberately use plain (non-adaptive) css() — every row would share
+    # the same identifier string, so a saved fingerprint from one row could get
+    # "relocated" onto an unrelated sibling row and silently return wrong data instead
+    # of a clean empty match. See amazon_wishlist.py for a concrete case of this.
+    rows = page.css("tbody tr", identifier="ludopedia_listing_row", adaptive=True, auto_save=True)
+    if not rows:
         return []
 
     listings = []
     title_lower = game_title.strip().lower()
 
-    for row in tbody.find_all("tr"):
-        cells = row.find_all("td")
+    for row in rows:
+        cells = row.css("td")
         if len(cells) < 6:
             continue
 
-        product_name = cells[0].get_text(strip=True)
-        city = cells[1].get_text(strip=True)
-        condition = cells[2].get_text(strip=True)
+        product_name = cells[0].get_all_text(separator="", strip=True)
+        city = cells[1].get_all_text(separator="", strip=True)
+        condition = cells[2].get_all_text(separator="", strip=True)
 
-        notes_span = cells[3].find("span", class_="anuncio-sub-titulo")
-        notes = notes_span.get_text(strip=True) if notes_span else ""
+        notes_els = cells[3].css("span.anuncio-sub-titulo")
+        notes = notes_els[0].get_all_text(separator="", strip=True) if notes_els else ""
 
-        price_el = cells[4].find("span", class_="proximo_lance")
-        price_brl = _parse_price(price_el.get_text(strip=True)) if price_el else None
+        price_els = cells[4].css("span.proximo_lance")
+        price_brl = _parse_price(price_els[0].get_all_text(separator="", strip=True)) if price_els else None
 
-        link_tag = cells[5].find("a")
-        listing_url = link_tag["href"] if link_tag and link_tag.get("href") else ""
+        link_els = cells[5].css("a")
+        listing_url = link_els[0].attrib.get("href", "") if link_els else ""
 
         listings.append({
             "product_name": product_name,

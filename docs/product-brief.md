@@ -366,7 +366,7 @@ gamehunter/
 ## Next Steps (ordered build plan)
 
 1. Register Ludopedia app at ludopedia.com.br/aplicativos → copy auto-generated `access_token`
-2. Initialize git repo at `raw/projects/boardgame-tracker/` with planned folder structure
+2. Initialize git repo at `projects/boardgame-tracker/` with planned folder structure
 3. Set up project skeleton — `pyproject.toml`, env var config, Docker Compose for local PostgreSQL
 4. Define DB schema — `games`, `stores`, `listings`, `price_history`, `ludopedia_listings` tables, migrations with Alembic
 5. Build Ludopedia game catalog — `GET /jogos?search=` wrapper, cache result to `games` table (includes `ludopedia_slug`)

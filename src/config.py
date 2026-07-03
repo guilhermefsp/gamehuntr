@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     database_url: str
     telegram_bot_token: str
     ludopedia_access_token: str
+    bgg_api_token: str = ""
+    # Separate from bgg_api_token — the ranks CSV data dump needs a logged-in
+    # BGG account session, not the XML API2 Bearer token.
+    bgg_username: str = ""
+    bgg_password: str = ""
 
     # Amazon Creators API credentials (replaces old PA API)
     amazon_access_key: str = "unset"      # Credential ID from Creators API portal
