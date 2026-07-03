@@ -5,8 +5,8 @@ on:
     - cron: "0 6 * * *" # 06:00 UTC daily
   workflow_dispatch:
     inputs:
-      bgg_top:
-        description: "How many top-ranked BGG games to include"
+      ludopedia_top:
+        description: "How many top-ranked Ludopedia games to include"
         default: "1000"
       concurrency:
         description: "Concurrent game refreshes"
@@ -48,5 +48,5 @@ jobs:
           WISHLIST_URL: ${{ secrets.WISHLIST_URL }}
         run: >
           uv run python scripts/export_prices.py
-          --bgg-top "${{ github.event.inputs.bgg_top || '1000' }}"
+          --ludopedia-top "${{ github.event.inputs.ludopedia_top || '1000' }}"
           --concurrency "${{ github.event.inputs.concurrency || '4' }}"

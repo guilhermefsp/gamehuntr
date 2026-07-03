@@ -6,11 +6,12 @@ from sqlalchemy import select
 from src import services
 from src.database import AsyncSessionLocal
 from src.models import Game
-from src.scrapers import bgg_ranks, ludopedia
+from src.scrapers import ludopedia_ranking
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONCURRENCY = 4
+ROWS_PER_PAGE = 50
 
 
 async def _get_searched_games() -> list[Game]:
@@ -19,60 +20,37 @@ async def _get_searched_games() -> list[Game]:
         return list(result.scalars().all())
 
 
-async def _get_game_by_bgg_id(bgg_id: int) -> Game | None:
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(select(Game).where(Game.bgg_id == bgg_id))
-        return result.scalar_one_or_none()
-
-
-async def _ensure_top_bgg_games(limit: int) -> list[Game]:
-    """Resolve BGG's top-N ranked games to Ludopedia entries, creating new Game rows
-    for any not already tracked. Games with no Ludopedia listing are skipped (logged,
-    not retried every run — they simply won't appear in the returned list)."""
-    ranks = await bgg_ranks.get_top_ranked(limit)
+async def _ensure_top_ludopedia_games(limit: int) -> list[Game]:
+    """Fetch Ludopedia's own top-N ranked games (source of truth for "which games to
+    track" — every entry is guaranteed to be a real Ludopedia listing since it's read
+    directly from Ludopedia's own catalog, unlike the earlier BGG-CSV-sourced approach
+    which only matched 13.6% of games due to translated-title mismatches), creating new
+    Game rows for any not already tracked. BGG metadata (rating/weight) is attached
+    best-effort via services.enrich_bgg — a failed BGG match just means no rating,
+    not an untracked game."""
+    pages = (limit + ROWS_PER_PAGE - 1) // ROWS_PER_PAGE
+    ranking = (await ludopedia_ranking.get_ranking(pages=pages))[:limit]
     games = []
-    skipped = 0
+    failed = 0
 
-    for entry in ranks:
+    for entry in ranking:
         try:
-            game = await _get_game_by_bgg_id(entry["bgg_id"])
-            if game:
-                games.append(game)
-                continue
-
-            results = await ludopedia.search_games(entry["name"], rows=1)
-            if not results:
-                skipped += 1
-                continue
-
-            raw = results[0]
             async with AsyncSessionLocal() as session:
-                existing = await session.execute(select(Game).where(Game.ludopedia_id == raw["id_jogo"]))
-                game = existing.scalar_one_or_none()
-                if game:
-                    game.bgg_id = entry["bgg_id"]
-                    game.bgg_rating = entry["rating"]
-                else:
-                    game = Game(
-                        ludopedia_id=raw["id_jogo"],
-                        title=raw["nm_jogo"],
-                        thumbnail=raw.get("thumb"),
-                        qt_quer=raw.get("qt_quer"),
-                        bgg_id=entry["bgg_id"],
-                        bgg_rating=entry["rating"],
-                    )
+                game = await session.get(Game, entry["ludopedia_id"])
+                if not game:
+                    game = Game(ludopedia_id=entry["ludopedia_id"], title=entry["title"])
                     session.add(game)
-                await session.commit()
-                await session.refresh(game)
+                    await session.commit()
+                    await session.refresh(game)
             games.append(game)
         except Exception as e:
-            # One bad Ludopedia search (e.g. a title with characters that trip up
-            # their API) must not take down the whole batch of ~1000 lookups.
-            logger.warning("Could not resolve BGG game %r (id %s) to Ludopedia: %s", entry["name"], entry["bgg_id"], e)
-            skipped += 1
+            # One bad entry must not take down the whole batch of ~1000 lookups
+            # (this already happened once with a title containing an apostrophe).
+            logger.warning("Could not track Ludopedia game %r (id %s): %s", entry["title"], entry["ludopedia_id"], e)
+            failed += 1
 
-    if skipped:
-        logger.info("Skipped %d top-ranked BGG games with no Ludopedia match", skipped)
+    if failed:
+        logger.info("Failed to track %d top-ranked Ludopedia games", failed)
     return games
 
 
@@ -88,17 +66,17 @@ async def _refresh_one(game: Game, semaphore: asyncio.Semaphore) -> None:
             logger.warning("Price refresh failed for %s: %s", game.title, e)
 
 
-async def run_export(bgg_top_n: int = 1000, concurrency: int = DEFAULT_CONCURRENCY) -> dict:
-    """Refresh prices for every previously-searched game plus BGG's top-N ranked
-    games. Games that drop out of top-N on a later run are never removed — once
-    tracked, always tracked, so price history stays continuous. Top-N is only
+async def run_export(ludopedia_top_n: int = 1000, concurrency: int = DEFAULT_CONCURRENCY) -> dict:
+    """Refresh prices for every previously-searched game plus Ludopedia's own top-N
+    ranked games. Games that drop out of top-N on a later run are never removed —
+    once tracked, always tracked, so price history stays continuous. Top-N is only
     used as today's seed for discovering new games to start tracking."""
     searched = await _get_searched_games()
-    bgg_top = await _ensure_top_bgg_games(bgg_top_n)
+    ludopedia_top = await _ensure_top_ludopedia_games(ludopedia_top_n)
 
     seen_ids = set()
     games = []
-    for g in searched + bgg_top:
+    for g in searched + ludopedia_top:
         if g.ludopedia_id not in seen_ids:
             seen_ids.add(g.ludopedia_id)
             games.append(g)
@@ -107,7 +85,7 @@ async def run_export(bgg_top_n: int = 1000, concurrency: int = DEFAULT_CONCURREN
     await asyncio.gather(*(_refresh_one(g, semaphore) for g in games))
 
     logger.info(
-        "Price export complete: %d games refreshed (%d searched, %d bgg-top)",
-        len(games), len(searched), len(bgg_top),
+        "Price export complete: %d games refreshed (%d searched, %d ludopedia-top)",
+        len(games), len(searched), len(ludopedia_top),
     )
-    return {"games_refreshed": len(games), "searched": len(searched), "bgg_top": len(bgg_top)}
+    return {"games_refreshed": len(games), "searched": len(searched), "ludopedia_top": len(ludopedia_top)}

@@ -1,89 +1,53 @@
-# Daily price export/history job (searched games + BGG top-N)
+# Daily price export/history job — invert top-N sourcing to Ludopedia's own ranking
 
-## Context
+## Context (what's already built and live-tested)
 
-`boardgame-tracker` currently only fetches prices reactively, one game at a time, when a user runs `/preço`. There's no scheduled job building up price history at scale. The user wants a **daily export** that keeps a real price history for (a) every game that's ever been searched, and (b) the top ~1000 games on BoardGameGeek by rank — explicitly *not* all tens of thousands of BGG games, just these two bounded sets.
+The daily price-export job (`src/jobs/price_export.py`, `scripts/export_prices.py`, `.github/workflows/export-prices.yml`) is built and working: it refreshes prices for every previously-searched game, records real price history for Ludopedia C2C prices for the first time (via two new synthetic "stores" reusing the existing `Listing`/`PriceHistory` schema — no migration needed), and reuses `services.py`'s `enrich_bgg`/`fetch_c2c_data`/`resolve_amazon_price` helpers (already extracted/renamed for cross-module reuse). This part is unchanged by this plan update.
 
-Two things surfaced during research that shape this plan:
+**What's changing:** the "top N" discovery mechanism. The original approach sourced the top 1000 from BGG's official ranks CSV (`src/scrapers/bgg_ranks.py`, login-gated, already live-verified and working), then tried to resolve each BGG-titled game to a Ludopedia listing via `ludopedia.search_games(bgg_title)`. A full-scale live run confirmed this only matched **136 of 1000** BGG games (13.6%). The user correctly diagnosed the likely cause: **name mismatch, not absence** — BGG's CSV gives international/English titles, while Ludopedia's catalog and search index use Brazilian-market titles, which are often translated (confirmed in our own data: "Twilight Imperium: Fourth Edition" → "Twilight Imperium (4ª Edição)", "Through the Ages..." → "...Uma Nova História da Civilização", "Gaia Project" → "Projeto Gaia"). Searching Ludopedia with an English title silently fails for many titles that do exist there.
 
-1. **BGG's `/browse/boardgame` pages cannot be scraped** — BGG's 2025-07 policy change (the same one that added mandatory Bearer-token auth to the XML API2) explicitly prohibits scraping their site; a BGG community thread confirms this directly. This is unlike the existing Amazon/Ludopedia scraping, which is a normal, unrestricted personal-use case. Instead, BGG officially publishes a daily-updated CSV **data dump** (`id, name, rank, bayesaverage, rater count` for every ranked game) specifically intended for this kind of data mining — but downloading it requires being **logged into a BGG account** (session-based, not the `BGG_API_TOKEN` already configured for the XML API2, which is a separate mechanism). The user chose this route and added `BGG_USERNAME`/`BGG_PASSWORD` to `.env`.
-2. **Ludopedia C2C prices currently have zero history.** `LudopediaListing` rows are fully deleted and reinserted on every scrape (`_save_ludopedia_listings` in `services.py`) — there's no trend data at all today, only a live snapshot. Amazon prices, by contrast, already get full history via the existing `Listing`/`PriceHistory` tables (`_record_price`). The fix is cheap: treat Ludopedia as another tracked "Store" (like `"Amazon BR"` already is) with two synthetic per-game listings (C2C Novo min, C2C Usado min), and record `PriceHistory` for them the same way Amazon prices already are. **No schema changes needed** — this reuses the existing `Store`/`Listing`/`PriceHistory` tables and their existing lazy-create pattern (`_get_or_create_amazon_store`), generalized to take a store name.
+**Fix — invert the flow.** Ludopedia has its own ranking at `https://ludopedia.com.br/ranking` (confirmed live: server-rendered, reachable via the existing tier-1 fetch — no bot-protection issue, and Ludopedia has no scraping ToS restriction unlike BGG). Sourcing top-N directly from there guarantees every entry is a real, resolvable Ludopedia listing (its own title, used to search its own catalog — should be a ~100% match rate, to be confirmed empirically). BGG then becomes purely a best-effort metadata enrichment step (already exactly what `services.enrich_bgg` does) — if a BGG match fails for a translated title, we just don't get a rating/weight for that game, we don't lose the game from tracking. This is a strict improvement: worst case degrades from "game untracked" to "game tracked without a BGG rating."
 
-## Deployment: GitHub Actions, not Vercel
+Confirmed live (this session) about the ranking page:
+- `https://ludopedia.com.br/ranking?pagina=N` — 50 games per page, `pagina=1` is implicit/default. At least 101 pages exist (~5000+ ranked games total) — top 1000 needs pages 1–20.
+- Each row (`div.media.pad-btm.bord-btm`) contains: rank (`"1º"`, `"2º"`, ... — strip the `º`), title (`h4.media-heading > a`), year, `Nota Rank` (Ludopedia's own bayesian-style rank score), `Média` (average user rating), `Notas` (rating count), and a link to the game page (slug-based URL, not the numeric `id_jogo` we need — still requires a `search_games` call to resolve the numeric id, same as before, just with a much more reliable title now).
+- No BGG cross-reference field exists anywhere in Ludopedia's API (`get_game()` response fully inspected — no `bgg_id`-equivalent). Cross-referencing still has to go through a title search in whichever direction; only the direction changed.
 
-At current/expected scale (up to ~1000 games, each requiring a Ludopedia marketplace scrape taking a few seconds), a full daily run will take tens of minutes — far beyond Vercel serverless function duration limits (even Pro tier caps at 300s). This reinforces the Vercel limitation already flagged in the prior scraping-refactor plan.
+## New file
 
-Options considered: (a) a **GitHub Actions scheduled workflow** — free, no new accounts, Playwright installs cleanly on GitHub's Ubuntu runners (unlike the Arch dev box used this session), secrets via GitHub Actions Secrets; (b) the user's own machine/home server cron — free but unreliable unless the machine is always on; (c) migrating the whole app off Vercel to a VPS — solves this and consolidates hosting, but is a separate, larger migration decision, not required just for this feature. **Chosen: (a) GitHub Actions.** The bot itself stays on Vercel, unchanged.
-
-Concretely: `scripts/export_prices.py` (deployment-agnostic, no Vercel coupling — same pattern as the existing scraper modules) gets a matching `.github/workflows/export-prices.yml` with a `schedule:` cron trigger, a `uv sync` + `uv run scrapling install` + `playwright install --with-deps chromium` setup step, then `uv run python scripts/export_prices.py`. Secrets (`DATABASE_URL`, `BGG_USERNAME`, `BGG_PASSWORD`, etc.) go into the GitHub repo's Actions Secrets, mirroring how they're already in `.env` for local/Vercel use.
-
-## Step 0 — verify the BGG login flow live (do this first, before building the rest)
-
-BGG's exact login API (endpoint, payload shape, whether it needs CSRF/cookies from a prior GET, whether the login form itself sits behind bot protection) is **not confirmed** — direct fetches to boardgamegeek.com have been Cloudflare-blocked from research in this session, and I could not verify the mechanics without real credentials. Now that `BGG_USERNAME`/`BGG_PASSWORD` are in `.env`:
-
-1. Try a plain `httpx` POST to `https://boardgamegeek.com/login/api/v1` with `{"credentials": {"username": ..., "password": ...}}` (BGG's known modern login API shape from community references) and inspect the response/cookies.
-2. If that fails (403/Cloudflare/CSRF), fall back to Scrapling's `StealthyFetcher` (already a project dependency) to drive a real browser through the login form, then extract cookies from that browser context for reuse in subsequent plain `httpx` requests to `data_dumps/bg_ranks`.
-3. Once a working method is found, implement it as `src/scrapers/bgg_ranks.py`'s `_login()`. Don't guess further than this — confirm against the live site.
-
-## New files
-
-### `.github/workflows/export-prices.yml` (new)
-Scheduled workflow: `on: schedule` (daily cron), sets up `uv`, runs `uv sync`, `uv run scrapling install`, `playwright install --with-deps chromium`, then `uv run python scripts/export_prices.py`, using repo Actions Secrets for `DATABASE_URL`/`BGG_USERNAME`/`BGG_PASSWORD`/etc. Also supports `workflow_dispatch` for manual runs while testing.
-
-### `src/scrapers/bgg_ranks.py` (new)
+### `src/scrapers/ludopedia_ranking.py` (new)
+HTML scraping (not the official API — belongs alongside `ludopedia_marketplace.py`'s pattern, not `ludopedia.py`'s pure-API pattern):
 ```python
-async def get_top_ranked(limit: int = 1000) -> list[dict]:
-    # -> [{"bgg_id": int, "name": str, "rank": int, "rating": float | None}, ...]
+async def get_ranking(pages: int = 20) -> list[dict]:
+    # -> [{"rank": int, "title": str, "year": int | None,
+    #      "nota_rank": float | None, "media": float | None, "notas": int | None}, ...]
 ```
-- Logs in (per Step 0), downloads the CSV from `boardgamegeek.com/data_dumps/bg_ranks`, caches it at `data/bgg_ranks.csv` (already gitignored via the existing `data/` rule) for 24h to avoid re-authenticating on every run.
-- Parses with stdlib `csv.DictReader`, filters `rank > 0` (BGG uses `0`/absent for unranked, same footgun pattern as `bayesaverage` in `bgg.py`), sorts by rank, returns top `limit`.
-- Returns `[]` (logs a warning, doesn't raise) if `BGG_USERNAME`/`BGG_PASSWORD` are unset — same best-effort convention as `_enrich_bgg`.
-
-### `src/jobs/__init__.py`, `src/jobs/price_export.py` (new package)
-Bulk orchestration, separate from `services.py` (which stays focused on "answer one interactive query"):
-```python
-async def run_export(bgg_top_n: int = 1000, concurrency: int = 4) -> dict:
-    # 1. searched = every row in `games` (already-searched games — no new tracking needed,
-    #    _resolve_game already upserts a Game row on every /preço lookup)
-    # 2. bgg_top = bgg_ranks.get_top_ranked(bgg_top_n), resolved to Game rows via
-    #    ludopedia.search_games(name) for any bgg_id not already tracked (new Game rows
-    #    created with bgg_id/bgg_rating pre-filled from the CSV; games with no Ludopedia
-    #    match are skipped and logged, not retried every run)
-    # 3. dedupe by ludopedia_id, refresh each concurrently (asyncio.Semaphore(concurrency)):
-    #    backfill_link -> enrich_bgg -> fetch_c2c_data (now also records C2C history,
-    #    see services.py changes) -> resolve_amazon_price
-    # 4. never remove games that drop out of top-N later — once tracked, always tracked,
-    #    so history stays continuous. Top-N is just today's seed for discovering new games.
-```
-Concurrency is bounded (default 4) to stay polite to Ludopedia (a small site) — first run costs ~1000 new `ludopedia.search_games` calls (official API) for BGG-sourced games not yet known; subsequent daily runs only search for newly-entered top-N games, everything else just re-scrapes/re-fetches prices for already-known games.
-
-### `scripts/export_prices.py` (new)
-Thin CLI wrapper matching the existing `scripts/test_*.py` pattern: `uv run python scripts/export_prices.py [--bgg-top 1000] [--concurrency 4]`, prints the summary dict (`games_refreshed`, `searched`, `bgg_top`).
+- Fetches `https://ludopedia.com.br/ranking?pagina=N` for `N` in `1..pages` via the existing `fetch.fetch()` tier-1 helper (matches `ludopedia_marketplace.py`'s approach — Ludopedia doesn't block tier-1 today, no stealth retry needed here either).
+- Parses each `div.media.pad-btm.bord-btm` row via Scrapling `.css()` — reuse the adaptive-selector convention from `ludopedia_marketplace.py`/`amazon_wishlist.py` (adaptive only on the outer per-page row selector, plain `.css()` for nested fields, per the identifier-collision lesson learned earlier this session).
+- Rank parsed from text like `"1º"` (strip trailing `º`, `int(...)`).
+- Not persisted as new `Game` columns — used purely as a discovery/seed mechanism for which games to track, same as the original BGG-top-N's role. (If useful later, Ludopedia's own rank score could become a stored field, but that's out of scope for what was asked here.)
 
 ## Modified files
 
-### `src/services.py`
-- **Generalize `_record_price`** to take a `store_name`/`store_base_url` (defaulting to the current Amazon values, so all existing call sites are unchanged) instead of being hardcoded to `_get_or_create_amazon_store`. Rename that helper to `_get_or_create_store(session, name, base_url)`.
-- **Add C2C history recording**: new `_record_c2c_price(game, condition, price_brl, url)` using two new store names (`"Ludopedia C2C Novo"`, `"Ludopedia C2C Usado"`, base url `https://ludopedia.com.br`), called from `_fetch_c2c_data` right after computing `c2c_novo_min`/`c2c_used_min`. This is what actually fixes "we have zero C2C history today" — it applies to every scrape, interactive or bulk.
-- **Extract `_resolve_amazon_price(game, query=None)`** from the inline 3-tier logic (Creators API → stored price → wishlist fallback) currently inside `get_price()`, so `price_export.py` can reuse it without duplicating. `get_price()` calls it the same way it does today; pure extraction, no behavior change.
-- **Drop the leading underscore** from `_enrich_bgg`, `_fetch_c2c_data`, `_backfill_link`, and the new `_resolve_amazon_price` — they're genuinely reused across modules now (`price_export.py` needs them), so keeping the "private" naming convention would be misleading. Straightforward rename, all call sites updated.
+### `src/jobs/price_export.py`
+- Replace `_ensure_top_bgg_games(limit)` with `_ensure_top_ludopedia_games(limit)`:
+  - `ranking = await ludopedia_ranking.get_ranking(pages=ceil(limit / 50))`, truncate to `limit`.
+  - For each entry: `results = await ludopedia.search_games(entry["title"], rows=1)` (existing client, now searching Ludopedia's own catalog with Ludopedia's own title — expected to reliably match); skip+log if no result (should be rare now, unlike before).
+  - Create/find the `Game` row by `ludopedia_id` (the resolved numeric id) — same upsert shape as before, minus the `bgg_id`/`bgg_rating` pre-fill (Ludopedia's ranking doesn't give a BGG id).
+  - Call `services.enrich_bgg(game)` on each (already exists, best-effort, cached via `bgg_synced_at`, searches BGG by title and silently no-ops on failure) — this is where BGG metadata now gets attached, accepting some misses gracefully rather than gating tracking on it.
+  - Keep the existing per-entry `try/except` isolation (the fix already made after the first full-scale run crashed on one bad Ludopedia search) — same risk exists in the new direction (a bad title/API error on one entry must not kill the batch).
+- Rename `run_export(bgg_top_n=..., ...)` → `run_export(ludopedia_top_n=..., ...)`, update the internal call site and the returned summary dict key (`bgg_top` → `ludopedia_top`).
+- `bgg_ranks.py` (the CSV-login module) is **not deleted** — it's fully built, live-verified, and harmless sitting unused; just no longer called from `price_export.py`'s main flow. Kept in case it's useful later (e.g. cross-checking or a supplementary global list).
 
-### `src/config.py`
-Add:
-```python
-bgg_username: str = ""
-bgg_password: str = ""
-```
-(No new setting needed for concurrency — passed as a CLI arg with a sane default instead, avoids config sprawl for a value only the export script uses.)
+### `scripts/export_prices.py`
+Rename `--bgg-top` → `--ludopedia-top` (default `1000`), update the `run_export(...)` call accordingly.
 
-### `.env.example`
-Add `BGG_USERNAME`/`BGG_PASSWORD` with a comment clarifying this is for the ranks CSV dump specifically, distinct from `BGG_API_TOKEN`. (The user added real values to `.env` directly, not pasted into chat — same caution as any password, stricter than the API token.)
+### `.github/workflows/export-prices.yml`
+Rename the `workflow_dispatch` input `bgg_top` → `ludopedia_top`, update the `--bgg-top` flag in the run step to `--ludopedia-top`. `BGG_USERNAME`/`BGG_PASSWORD` secrets stay wired (still needed if `bgg_ranks.py` is ever reactivated, and harmless to leave configured) but are no longer load-bearing for this workflow to succeed — `enrich_bgg` already degrades gracefully without `BGG_API_TOKEN`/credentials.
 
 ## Verification
 
-0. ~~Copy this plan into the project repo~~ — done, this file.
-1. Complete Step 0 (live BGG login spike) now that credentials are in `.env` — confirm `bgg_ranks.get_top_ranked(10)` returns real ranked games.
-2. Run `scripts/export_prices.py --bgg-top 20 --concurrency 2` (small N first) and confirm: new `Game` rows appear for previously-untracked top-ranked titles, `PriceHistory` rows appear for both `"Amazon BR"` and the two new Ludopedia C2C stores, and nothing crashes on games with no Ludopedia match.
-3. Run `scripts/test_preco.py` again afterward to confirm the interactive path still works unchanged (pure-extraction refactor of `services.py` should be behavior-preserving).
-4. Query `PriceHistory` joined to the new C2C stores for a couple of games to confirm multiple rows accumulate across repeated runs (i.e. history is actually being built, not just a snapshot overwrite).
-5. Scale up `--bgg-top 1000` only after the above passes, and time it to give the user a real number for how long a full daily run takes (needed for them to pick a cron host/schedule later).
+1. Small scale first: `scripts/export_prices.py --ludopedia-top 50 --concurrency 2`. The key thing to confirm versus last time: **near-100% resolution rate** (all or nearly all 50 ranking entries should successfully resolve to a Ludopedia game, unlike the 13.6% match rate from the BGG-sourced approach) — this is the actual fix being verified, not just "it runs."
+2. Spot-check a few newly-created `Game` rows: confirm `bgg_id`/`bgg_rating`/`bgg_weight` got populated for at least some of them via `enrich_bgg` (some misses are expected and fine, but not all-misses).
+3. Re-run at full `--ludopedia-top 1000` scale, confirm no crash (per-entry error isolation holds), and record the real total game count + timing for comparison against the previous BGG-sourced run's 140 games / 7m8s.
+4. Confirm `scripts/test_preco.py` still passes (no changes to the interactive path in this update).
