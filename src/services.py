@@ -1,7 +1,9 @@
 import logging
+import re
 from datetime import datetime
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from src.config import settings
 from src.database import AsyncSessionLocal
@@ -43,6 +45,29 @@ async def get_price(query: str) -> dict | None:
     }
 
 
+_TITLE_STOPWORDS = {"a", "an", "the", "de", "da", "do", "e", "and", "of", "is",
+                    "edition", "edicao", "edição", "2nd", "second"}
+
+
+def _title_tokens(title: str) -> set[str]:
+    return {t for t in re.sub(r"[^a-z0-9]+", " ", title.lower()).split() if t not in _TITLE_STOPWORDS}
+
+
+def _is_plausible_amazon_match(game_title: str, item_title: str | None, threshold: float = 0.6) -> bool:
+    """Guards against Amazon's keyword search returning an unrelated/near-miss product
+    (e.g. searching "Caylus 1303" returning plain "Caylus") as the top hit. Without this,
+    resolve_amazon_price would tag the wrong game with someone else's ASIN, which then
+    fails loudly at save time (unique constraint) — or worse, silently shows the wrong
+    game's price when the constraint doesn't happen to collide."""
+    if not item_title:
+        return True
+    game_tokens = _title_tokens(game_title)
+    if not game_tokens:
+        return True
+    item_tokens = _title_tokens(item_title)
+    return len(game_tokens & item_tokens) / len(game_tokens) >= threshold
+
+
 async def resolve_amazon_price(game: Game, query: str | None = None) -> dict | None:
     """3-tier Amazon price resolution: Creators API -> stored DB price -> wishlist
     scrape fallback. Shared by the interactive get_price() flow and the bulk
@@ -54,9 +79,9 @@ async def resolve_amazon_price(game: Game, query: str | None = None) -> dict | N
     if amazon.is_available():
         if not game.asin:
             results = amazon.search_items(query, count=1)
-            if results:
-                await _save_asin(game.ludopedia_id, results[0]["asin"])
-                game.asin = results[0]["asin"]
+            if results and _is_plausible_amazon_match(game.title, results[0].get("title")):
+                if await _save_asin(game.ludopedia_id, results[0]["asin"]):
+                    game.asin = results[0]["asin"]
         amazon_result = amazon.search_items(game.title, count=1)
         item = amazon_result[0] if amazon_result else None
         if item:
@@ -100,8 +125,8 @@ async def sync_wishlist_prices() -> dict:
             if not game and item["title"]:
                 game = await _resolve_game(item["title"])
                 if game and not game.asin:
-                    await _save_asin(game.ludopedia_id, item["asin"])
-                    game.asin = item["asin"]
+                    if await _save_asin(game.ludopedia_id, item["asin"]):
+                        game.asin = item["asin"]
 
             if game and item["price_brl"] is not None:
                 await _record_price(game, {
@@ -287,13 +312,22 @@ def _normalize_link(link: str) -> str:
     return link.rstrip("/")
 
 
-async def _save_asin(ludopedia_id: int, asin: str) -> None:
+async def _save_asin(ludopedia_id: int, asin: str) -> bool:
+    """Returns False (instead of raising) when another game already owns this ASIN,
+    so callers can skip the assignment without losing everything else they fetched."""
     async with AsyncSessionLocal() as session:
         result = await session.execute(select(Game).where(Game.ludopedia_id == ludopedia_id))
         game = result.scalar_one_or_none()
-        if game:
-            game.asin = asin
+        if not game:
+            return False
+        game.asin = asin
+        try:
             await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            logger.warning("ASIN %s already belongs to another game; not assigning to ludopedia_id=%s", asin, ludopedia_id)
+            return False
+        return True
 
 
 async def _record_price(
@@ -361,8 +395,8 @@ async def _fetch_wishlist_price(game: Game) -> dict | None:
             match = next((i for i in items if i.get("title") and game_title_lower in i["title"].lower()), None)
         if match:
             if not game.asin and match.get("asin"):
-                await _save_asin(game.ludopedia_id, match["asin"])
-                game.asin = match["asin"]
+                if await _save_asin(game.ludopedia_id, match["asin"]):
+                    game.asin = match["asin"]
             result = {"price_brl": match["price_brl"], "in_stock": True, "url": match["url"]}
             await _record_price(game, result)
             return result
