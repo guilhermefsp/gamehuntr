@@ -20,9 +20,8 @@ class Settings(BaseSettings):
     amazon_partner_tag: str = ""
     amazon_credential_version: str = "3.1"  # 3.1=NA/LWA, 3.2=EU/LWA, 3.3=FE/LWA
 
-    # Wishlist scraper — set WISHLIST_ENABLED=true to activate
-    # Disable (set to false) once Amazon PA API credentials are available
-    wishlist_enabled: bool = False
+    # Wishlist scraper — automatic fallback used only when the Amazon Creators API
+    # credentials above aren't configured (see src.scrapers.amazon.is_available()).
     wishlist_url: str = ""
 
     # Vercel cron authentication (auto-provided by Vercel)

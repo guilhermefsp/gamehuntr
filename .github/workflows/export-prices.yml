@@ -44,7 +44,6 @@ jobs:
           AMAZON_SECRET_KEY: ${{ secrets.AMAZON_SECRET_KEY }}
           AMAZON_PARTNER_TAG: ${{ secrets.AMAZON_PARTNER_TAG }}
           AMAZON_CREDENTIAL_VERSION: ${{ secrets.AMAZON_CREDENTIAL_VERSION }}
-          WISHLIST_ENABLED: ${{ secrets.WISHLIST_ENABLED }}
           WISHLIST_URL: ${{ secrets.WISHLIST_URL }}
         run: >
           uv run python scripts/export_prices.py

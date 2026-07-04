@@ -75,20 +75,20 @@ uv run python scripts/setup_webhook.py https://your-app.vercel.app
 | `AMAZON_ACCESS_KEY` | — | Amazon PA API key (optional until obtained) |
 | `AMAZON_SECRET_KEY` | — | Amazon PA API secret |
 | `AMAZON_PARTNER_TAG` | — | Amazon Associates tag |
-| `WISHLIST_ENABLED` | — | `true` to activate wishlist scraper |
 | `WISHLIST_URL` | — | Amazon public wishlist URL to scrape |
 | `CRON_SECRET` | — | Auto-provided by Vercel for cron authentication |
 
 ## Wishlist Scraper
 
-A bridge for Amazon prices until PA API credentials are available.
+A bridge for Amazon prices until PA API credentials are available. Activates automatically
+(no flag to flip) whenever `AMAZON_ACCESS_KEY`/`AMAZON_SECRET_KEY` aren't configured, and
+turns itself off the moment they are.
 
 - Scrapes a public Amazon wishlist daily at noon UTC
 - Matches each item to a Ludopedia game by title
 - Prices appear on the next `/preço` call
 
-**Enable:** set `WISHLIST_ENABLED=true` and `WISHLIST_URL=<your-wishlist-url>` in Vercel env vars.
-**Disable:** set `WISHLIST_ENABLED=false` when PA API keys are configured.
+**Enable:** set `WISHLIST_URL=<your-wishlist-url>` in Vercel env vars.
 
 ## Common Commands
 

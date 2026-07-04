@@ -66,8 +66,9 @@ async def resolve_amazon_price(game: Game, query: str | None = None) -> dict | N
     if not item:
         item = await _get_stored_amazon_price(game)
 
-    # 3. Live wishlist scrape fallback (when enabled; matches by ASIN or title)
-    if not item and settings.wishlist_enabled and settings.wishlist_url:
+    # 3. Live wishlist scrape fallback (only when the Creators API isn't configured;
+    # matches by ASIN or title)
+    if not item and not amazon.is_available() and settings.wishlist_url:
         item = await _fetch_wishlist_price(game)
 
     return item
@@ -82,8 +83,9 @@ async def update_asin(ludopedia_id: int, asin: str) -> None:
 
 
 async def sync_wishlist_prices() -> dict:
-    """Scrape the Amazon wishlist, match games to Ludopedia, store prices. No-op when disabled."""
-    if not settings.wishlist_enabled or not settings.wishlist_url:
+    """Scrape the Amazon wishlist, match games to Ludopedia, store prices. No-op once the
+    Amazon Creators API is configured (wishlist is only the bridge until then)."""
+    if amazon.is_available() or not settings.wishlist_url:
         return {"skipped": True}
 
     from src.scrapers import amazon_wishlist
