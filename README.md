@@ -27,7 +27,7 @@ User → Telegram → POST /webhook → Vercel (FastAPI, serverless)
 ```
 
 **Local dev** uses Docker Compose (Postgres) + polling mode.
-**Production** runs on Vercel webhook, always on, zero cost.
+**Production** runs on Vercel webhook, always on, zero cost. Pushes to `main` auto-deploy via the Vercel GitHub integration.
 
 ## Local Setup
 
