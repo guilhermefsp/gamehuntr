@@ -1,6 +1,9 @@
+import logging
 import re
 
 from src.scrapers import fetch as fetch_module
+
+logger = logging.getLogger(__name__)
 
 _HEADERS = {
     "User-Agent": (
@@ -20,21 +23,7 @@ def _parse_price(text: str) -> float | None:
         return None
 
 
-async def scrape_listings(game_link: str, game_title: str) -> list[dict]:
-    """
-    Scrapes the ?v=anuncios page for a game and returns all listings.
-    game_link: e.g. "https://ludopedia.com.br/jogo/terra-mystica"
-    """
-    url = f"{game_link.rstrip('/')}?v=anuncios"
-
-    # Ludopedia doesn't block tier-1 requests today, so no stealth retry-on-empty
-    # here (unlike amazon_wishlist.py) — a stealth retry would just add latency
-    # with no benefit for a site that isn't blocking us.
-    result = await fetch_module.fetch(url, headers=_HEADERS)
-    if not result:
-        raise RuntimeError(f"Failed to fetch marketplace page for {game_title}")
-
-    page = result.page
+def _parse_rows(page, game_title: str) -> list[dict]:
     # Adaptive relocation is only applied to this outer row selector: it appears once
     # per page, so its (url, identifier) fingerprint is unambiguous. The nested per-row
     # lookups below deliberately use plain (non-adaptive) css() — every row would share
@@ -75,5 +64,33 @@ async def scrape_listings(game_link: str, game_title: str) -> list[dict]:
             "listing_url": listing_url,
             "is_game_match": product_name.strip().lower() == title_lower,
         })
+
+    return listings
+
+
+async def scrape_listings(game_link: str, game_title: str) -> list[dict]:
+    """
+    Scrapes the ?v=anuncios page for a game and returns all listings.
+    game_link: e.g. "https://ludopedia.com.br/jogo/terra-mystica"
+
+    Retries once via the tier-2 stealth browser if tier-1 comes back with zero
+    rows — Ludopedia mostly doesn't block tier-1, but an intermittent miss here
+    is otherwise indistinguishable from "this game genuinely has no listings",
+    which previously caused the bot to falsely report "sem anúncios" for games
+    that do have active listings. Same pattern as amazon_wishlist.py.
+    """
+    url = f"{game_link.rstrip('/')}?v=anuncios"
+
+    result = await fetch_module.fetch(url, headers=_HEADERS)
+    if not result:
+        raise RuntimeError(f"Failed to fetch marketplace page for {game_title}")
+
+    listings = _parse_rows(result.page, game_title)
+
+    if not listings:
+        logger.info("Tier-1 marketplace scrape got 0 rows for %s, retrying with stealth browser", game_title)
+        stealth_result = await fetch_module.fetch(url, headers=_HEADERS, force_stealth=True)
+        if stealth_result:
+            listings = _parse_rows(stealth_result.page, game_title)
 
     return listings
