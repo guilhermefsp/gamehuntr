@@ -1,24 +1,13 @@
-See PRODUCT_BRIEF.md for full phased plan. Summary:
+# Roadmap moved
 
-## Phase 1 — Launch Readiness
-- [ ] search_count column on Game + User table (migrations)
-- [ ] /start + /help commands
-- [ ] /preço → send_photo with BGG rating/weight enrichment (bgg_rating, bgg_weight columns)
-- [ ] Disambiguation: fetch rows=5, "Jogo errado?" → results #2-5 as new photo + inline buttons
-- [ ] Link support: /preço <ludopedia_url> and /preço <bgg_url>
-- [ ] PA API as primary price path; wishlist scraper as fallback
+The phased roadmap now lives in **`docs/plans/ludopedia-listing-crawler.md`** (unified design, 2026-07-06), which merged this file's phases with the marketplace crawler plan:
 
-## Phase 2 — Engagement
-- [ ] User table FK + watchlist table (migration)
-- [ ] /quero + /lista + /alertar + /alertas + /cancelar-alerta
-- [ ] Daily C2C cron for watched games + alert check + Telegram notifications
+- Phase 0 — Termos de Uso, UA/contact decision
+- Phase 1 — Bot launch readiness (was Phase 1 here: search_count, /start + /help, send_photo + BGG, disambiguation, link support, PA API)
+- Phase 2 — Unified marketplace foundation (marketplace_listings table, upsert refactor, produto parser)
+- Phase 3 — Nightly sitemap sync + one-time sweep; price_export reads C2C from DB
+- Phase 4 — Engagement (was Phase 2 here: watchlist, alerts — now driven by the nightly sync)
+- Phase 5 — Ops & surfacing (was Phase 3 here: admin dashboard; plus "últimas vendas")
+- Deferred — forward monitor, gap probe, MercadoLivre scraper
 
-## Phase 3 — Ops
-- [ ] Admin dashboard: /admin route, FastAPI + Jinja2, Basic Auth
-  - Games table (search_count, ASIN correction)
-  - Price history chart per game
-  - Cron log
-  - Users/watchlist overview
-
-## Post-launch
-- [ ] MercadoLivre scraper (Playwright)
+See also `PRODUCT_BRIEF.md` for feature details (caption formats, disambiguation flow, dashboard contents).
