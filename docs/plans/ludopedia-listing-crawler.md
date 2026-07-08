@@ -129,12 +129,14 @@ Integrates `todo.md` / `PRODUCT_BRIEF.md`. Bot-UX work (Phase 1) is orthogonal t
 - [ ] **Email Ludopedia a heads-up — blocking prerequisite for Phase 3** (cl. 19.2 requires express authorization for DB reproduction; pitch: the bot funnels buyers into listings, and total scraping volume goes *down* vs today's bulk job)
 
 ### Phase 1 — Bot launch readiness (from todo.md, unchanged)
-- [ ] `search_count` column on Game + `User` table (migrations)
-- [ ] `/start` + `/help` commands
-- [ ] `/preço` → `send_photo` with BGG rating/weight enrichment
-- [ ] Disambiguation: fetch rows=5, "Jogo errado?" → results #2–5 as new photo + inline buttons
-- [ ] Link support: `/preço <ludopedia_url>` and `/preço <bgg_url>` — also accept `/produto/{id}` URLs once Phase 2 lands
-- [ ] PA API as primary price path; wishlist scraper as fallback
+- [x] `search_count` column on Game + `User` table (migrations) (2026-07-07 — migration 0003, applied to Neon; user upsert on every interaction)
+- [x] `/start` + `/help` commands (2026-07-07)
+- [x] `/preço` → `send_photo` with BGG rating/weight enrichment (2026-07-07 — caption gains `⭐ 7.3 · 🧠 1.7/5` line; falls back to text when no thumbnail)
+- [x] Disambiguation: fetch rows=5, "Jogo errado?" → results #2–5 as new photo + inline buttons (2026-07-07 — stateless: callback re-searches, `pick:{id}` runs fresh lookup)
+- [x] Link support: `/preço <ludopedia_url>` and `/preço <bgg_url>` — also accept `/produto/{id}` URLs once Phase 2 lands (2026-07-07 — `/jogo/{slug}` + BGG `/boardgame/{id}` done; `/produto/{id}` waits for Phase 2)
+- [x] PA API as primary price path; wishlist scraper as fallback (was already implemented in `resolve_amazon_price`; Creators API still returns 403 AssociateNotEligible, so stored-price/wishlist fallback is what actually serves today)
+
+> Code complete 2026-07-07, verified at service level (test_preco + URL/disambiguation/user-upsert checks). Not yet committed/deployed — after deploy, test `/start`, `/preço Wingspan`, a Ludopedia URL, and the "Jogo errado?" flow in Telegram.
 
 ### Phase 2 — Unified marketplace foundation
 - [ ] Migration: create `marketplace_listings` + `crawl_state` + `crawl_log`; drop `ludopedia_listings`

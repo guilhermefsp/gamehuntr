@@ -22,6 +22,7 @@ class Game(Base):
     max_players: Mapped[int | None] = mapped_column(Integer, nullable=True)
     duration: Mapped[int | None] = mapped_column(Integer, nullable=True)
     qt_quer: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    search_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -66,6 +67,15 @@ class PriceHistory(Base):
     recorded_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     listing: Mapped["Listing"] = relationship(back_populates="history")
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=False)
+    username: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    first_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class LudopediaListing(Base):

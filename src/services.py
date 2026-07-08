@@ -2,12 +2,13 @@ import logging
 import re
 from datetime import datetime
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update as sa_update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 
 from src.config import settings
 from src.database import AsyncSessionLocal
-from src.models import Game, Listing, LudopediaListing, PriceHistory, Store
+from src.models import Game, Listing, LudopediaListing, PriceHistory, Store, User
 from src.scrapers import amazon, bgg, ludopedia
 from src.scrapers import ludopedia_marketplace
 
@@ -18,12 +19,37 @@ LUDOPEDIA_NOVO_STORE_NAME = "Ludopedia C2C Novo"
 LUDOPEDIA_USADO_STORE_NAME = "Ludopedia C2C Usado"
 
 
+LUDOPEDIA_JOGO_URL_RE = re.compile(r"https?://(?:www\.)?ludopedia\.com\.br/jogo/([\w-]+)", re.IGNORECASE)
+BGG_URL_RE = re.compile(r"https?://(?:www\.)?boardgamegeek\.com/boardgame(?:expansion)?/(\d+)", re.IGNORECASE)
+
+
+def _is_url(query: str) -> bool:
+    return query.lower().startswith(("http://", "https://"))
+
+
 async def get_price(query: str) -> dict | None:
-    """Main entry point: resolve game, fetch C2C + Amazon prices, persist, return display dict."""
-    game = await _resolve_game(query)
+    """Main entry point: resolve game (by name, Ludopedia /jogo/ URL, or BGG URL),
+    fetch C2C + Amazon prices, persist, return display dict."""
+    query = query.strip()
+    game = await _resolve_input(query)
     if not game:
         return None
+    # A raw URL is useless as an Amazon keyword search — use the resolved title
+    amazon_query = game.title if _is_url(query) else query
+    return await _build_price_result(game, amazon_query)
 
+
+async def get_price_by_id(ludopedia_id: int) -> dict | None:
+    """Price lookup for a known Ludopedia id — used when the user picks a game
+    from the disambiguation buttons."""
+    game = await _get_or_fetch_game_by_id(ludopedia_id)
+    if not game:
+        return None
+    await _increment_search_count(game.ludopedia_id)
+    return await _build_price_result(game, game.title)
+
+
+async def _build_price_result(game: Game, amazon_query: str) -> dict:
     # Backfill ludopedia_link if missing or stored as a broken relative path
     if not game.ludopedia_link or not game.ludopedia_link.startswith("https://"):
         game = await backfill_link(game)
@@ -31,18 +57,66 @@ async def get_price(query: str) -> dict | None:
     game = await enrich_bgg(game)
 
     c2c = await fetch_c2c_data(game)
-    item = await resolve_amazon_price(game, query)
+    item = await resolve_amazon_price(game, amazon_query)
     lowest = await _get_lowest_ever(game.ludopedia_id)
 
     return {
         "title": game.title,
         "ludopedia_id": game.ludopedia_id,
+        "thumbnail": game.thumbnail,
+        "bgg_rating": float(game.bgg_rating) if game.bgg_rating is not None else None,
+        "bgg_weight": float(game.bgg_weight) if game.bgg_weight is not None else None,
         "price_brl": item["price_brl"] if item else None,
         "in_stock": item["in_stock"] if item else False,
         "url": item["url"] if item else None,
         "lowest_ever": lowest,
         **c2c,
     }
+
+
+async def _resolve_input(query: str) -> Game | None:
+    m = LUDOPEDIA_JOGO_URL_RE.search(query)
+    if m:
+        return await _resolve_ludopedia_slug(m.group(1))
+    m = BGG_URL_RE.search(query)
+    if m:
+        return await _resolve_bgg_id(int(m.group(1)))
+    return await _resolve_game(query)
+
+
+async def search_alternatives(query: str, exclude_id: int | None = None, limit: int = 4) -> list[dict]:
+    """Top Ludopedia search results for the disambiguation flow ("Jogo errado?")."""
+    results = await ludopedia.search_games(query, rows=5)
+    return [
+        {
+            "ludopedia_id": r["id_jogo"],
+            "title": r["nm_jogo"],
+            "year": r.get("ano_publicacao"),
+            "thumbnail": r.get("thumb"),
+        }
+        for r in results if r["id_jogo"] != exclude_id
+    ][:limit]
+
+
+async def record_user(tg_user) -> None:
+    """Upsert the Telegram user on every interaction (FK target for the Phase 4
+    watchlist). Never raises — user bookkeeping must not break a price lookup."""
+    if tg_user is None:
+        return
+    try:
+        async with AsyncSessionLocal() as session:
+            stmt = pg_insert(User).values(
+                telegram_user_id=tg_user.id,
+                username=tg_user.username,
+                first_name=tg_user.first_name,
+            ).on_conflict_do_update(
+                index_elements=["telegram_user_id"],
+                set_={"username": tg_user.username, "first_name": tg_user.first_name},
+            )
+            await session.execute(stmt)
+            await session.commit()
+    except Exception as e:
+        logger.warning("record_user failed for %s: %s", getattr(tg_user, "id", None), e)
 
 
 _TITLE_STOPWORDS = {"a", "an", "the", "de", "da", "do", "e", "and", "of", "is",
@@ -222,14 +296,68 @@ async def _resolve_game(query: str) -> Game | None:
             select(Game).where(Game.title.ilike(f"%{query}%")).limit(1)
         )
         game = result.scalar_one_or_none()
-        if game:
-            return game
+    if game:
+        await _increment_search_count(game.ludopedia_id)
+        return game
 
-    results = await ludopedia.search_games(query, rows=1)
+    results = await ludopedia.search_games(query, rows=5)
     if not results:
         return None
+    return await _get_or_create_game_from_search(results[0])
 
-    raw = results[0]
+
+async def _resolve_ludopedia_slug(slug: str) -> Game | None:
+    """Resolve a https://ludopedia.com.br/jogo/{slug} URL to a Game."""
+    url = f"https://ludopedia.com.br/jogo/{slug}"
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Game).where(Game.ludopedia_link == url))
+        game = result.scalar_one_or_none()
+    if game:
+        await _increment_search_count(game.ludopedia_id)
+        return game
+
+    # The API has no by-slug endpoint: search on the de-hyphenated slug and
+    # prefer the result whose link actually ends with the slug
+    results = await ludopedia.search_games(slug.replace("-", " "), rows=5)
+    if not results:
+        return None
+    suffix = f"/jogo/{slug}".lower()
+    match = next(
+        (r for r in results if _normalize_link(r.get("link", "")).lower().endswith(suffix)),
+        results[0],
+    )
+    return await _get_or_create_game_from_search(match)
+
+
+async def _resolve_bgg_id(bgg_id: int) -> Game | None:
+    """Resolve a boardgamegeek.com/boardgame/{id} URL to a Game via the BGG title."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Game).where(Game.bgg_id == bgg_id))
+        game = result.scalar_one_or_none()
+    if game:
+        await _increment_search_count(game.ludopedia_id)
+        return game
+
+    details = await bgg.get_game_details(bgg_id)
+    if not details or not details.get("title"):
+        return None
+    game = await _resolve_game(details["title"])
+    if game and game.bgg_id is None:
+        await _save_bgg_id(game.ludopedia_id, bgg_id)
+        game.bgg_id = bgg_id
+    return game
+
+
+async def _get_or_create_game_from_search(raw: dict) -> Game:
+    """Turn a Ludopedia API search row into a persisted Game, reusing an existing
+    row when the id is already known (a game can be reached via many search terms)."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Game).where(Game.ludopedia_id == raw["id_jogo"]))
+        game = result.scalar_one_or_none()
+    if game:
+        await _increment_search_count(game.ludopedia_id)
+        return game
+
     link = _normalize_link(raw.get("link", ""))
 
     # Fallback: search endpoint may not include link — fetch detail
@@ -238,7 +366,7 @@ async def _resolve_game(query: str) -> Game | None:
             detail = await ludopedia.get_game(raw["id_jogo"])
             link = _normalize_link(detail.get("link", ""))
         except Exception:
-            link = None
+            link = ""
 
     game = Game(
         ludopedia_id=raw["id_jogo"],
@@ -246,12 +374,69 @@ async def _resolve_game(query: str) -> Game | None:
         thumbnail=raw.get("thumb"),
         qt_quer=raw.get("qt_quer"),
         ludopedia_link=link or None,
+        search_count=1,
     )
     async with AsyncSessionLocal() as session:
         session.add(game)
         await session.commit()
         await session.refresh(game)
     return game
+
+
+async def _get_or_fetch_game_by_id(ludopedia_id: int) -> Game | None:
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Game).where(Game.ludopedia_id == ludopedia_id))
+        game = result.scalar_one_or_none()
+    if game:
+        return game
+
+    try:
+        detail = await ludopedia.get_game(ludopedia_id)
+    except Exception as e:
+        logger.warning("Could not fetch Ludopedia game %s: %s", ludopedia_id, e)
+        return None
+
+    game = Game(
+        ludopedia_id=detail["id_jogo"],
+        title=detail["nm_jogo"],
+        thumbnail=detail.get("thumb"),
+        qt_quer=detail.get("qt_quer"),
+        ludopedia_link=_normalize_link(detail.get("link", "")) or None,
+    )
+    async with AsyncSessionLocal() as session:
+        session.add(game)
+        await session.commit()
+        await session.refresh(game)
+    return game
+
+
+async def _increment_search_count(ludopedia_id: int) -> None:
+    """Tracks lookup popularity — used post-launch to decide which games to add
+    to the Amazon wishlist."""
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            sa_update(Game)
+            .where(Game.ludopedia_id == ludopedia_id)
+            .values(search_count=Game.search_count + 1)
+        )
+        await session.commit()
+
+
+async def _save_bgg_id(ludopedia_id: int, bgg_id: int) -> bool:
+    """Returns False (instead of raising) when another game already owns this bgg_id."""
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(select(Game).where(Game.ludopedia_id == ludopedia_id))
+        game = result.scalar_one_or_none()
+        if not game:
+            return False
+        game.bgg_id = bgg_id
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            logger.warning("bgg_id %s already belongs to another game; not assigning to ludopedia_id=%s", bgg_id, ludopedia_id)
+            return False
+        return True
 
 
 async def backfill_link(game: Game) -> Game:
